@@ -1,0 +1,79 @@
+name: dsh-desktop-win-portable
+
+# 触发方式：
+#   1) push 到 main —— 首次推送即自动触发
+#   2) 手动 workflow_dispatch —— 可指定上游 tag
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream deepseek-ai/deepseek-harness tag to build"
+        required: true
+        default: "dsh-v0.1.6-alpha.2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-desktop-win-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - name: Checkout upstream at tag
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ github.event.inputs.tag || 'dsh-v0.1.6-alpha.2' }}
+          fetch-depth: 1
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Activate pnpm 11.7.0
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.7.0 --activate
+          pnpm --version
+
+      - name: Install workspace dependencies
+        shell: pwsh
+        run: pnpm install
+
+      - name: Prepare packaging environment
+        shell: pwsh
+        run: |
+          if (-not (Test-Path apps/desktop/.env.windows)) {
+            Copy-Item apps/desktop/.env.windows.example apps/desktop/.env.windows
+          }
+
+      - name: Package win-x64 portable directory (unsigned)
+        shell: pwsh
+        run: pnpm --filter "@deepseek-ai/dsh-desktop" run package:win:x64:dir --unsigned
+
+      - name: List produced artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          $root = "apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts"
+          if (Test-Path $root) {
+            Get-ChildItem -Recurse -Depth 1 $root | Select-Object FullName, Length | Format-Table -AutoSize
+          } else {
+            Write-Host "No artifacts directory at $root"
+          }
+
+      - name: Upload portable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-win-x64-portable
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/
+          compression-level: 1
+          if-no-files-found: error
