@@ -13,7 +13,17 @@ pnpm --filter "@deepseek-ai/dsh-desktop" run package:win:x64:dir --unsigned
 
 ## 改动版本（一键更新）
 
-只需要改 **`version.txt`** 一行，然后 push 到 `main`：
+本仓库带一个 `release.sh`，在 macOS/Linux 上一条命令搞定：
+
+```bash
+./release.sh                 # 自动取上游最新 tag
+./release.sh dsh-v0.1.8-alpha.1
+./release.sh --dry-run       # 只看看会用什么 tag
+```
+
+它做三件事：写 `version.txt` → commit → push；push 会自动触发构建。
+
+手动等价写法：
 
 ```bash
 echo "dsh-v0.1.8-alpha.1" > version.txt
