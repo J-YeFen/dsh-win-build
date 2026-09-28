@@ -1,17 +1,24 @@
 name: dsh-desktop-win-portable
 
+# 出包流程（免安装、未签名、win-x64 目录版）
+#
 # 触发方式：
-#   1) push 到 main —— 首次推送即自动触发
-#   2) 手动 workflow_dispatch —— 可指定上游 tag
+#   1) push 到 main 且改动了 version.txt 或本文件 —— 自动按 version.txt 里的 tag 出包
+#   2) 手动 workflow_dispatch —— 可临时指定别的 tag（留空则读 version.txt）
+#
+# 升级版本 = 改 version.txt 一行 + push（无需 token、无需本机 Windows）。
 on:
   push:
     branches: [main]
+    paths:
+      - 'version.txt'
+      - '.github/workflows/dsh-desktop-win-build.yml'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Upstream deepseek-ai/deepseek-harness tag to build"
-        required: true
-        default: "dsh-v0.1.6-alpha.2"
+        description: "Upstream deepseek-ai/deepseek-harness tag（留空 = 读 version.txt）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -25,11 +32,27 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 240
     steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream tag
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}".Trim()
+          if (-not $tag) { $tag = (Get-Content version.txt -Raw).Trim() }
+          if (-not $tag) { throw "version.txt is empty and no tag input was given" }
+          $version = $tag -replace '^dsh-v', ''
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building upstream tag: $tag (version $version)"
+
       - name: Checkout upstream at tag
         uses: actions/checkout@v4
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: ${{ github.event.inputs.tag || 'dsh-v0.1.6-alpha.2' }}
+          ref: ${{ steps.ver.outputs.tag }}
+          path: src
           fetch-depth: 1
 
       - name: Setup Node.js 24
@@ -38,6 +61,7 @@ jobs:
           node-version: 24
 
       - name: Activate pnpm 11.7.0
+        working-directory: src
         shell: pwsh
         run: |
           corepack enable
@@ -45,27 +69,66 @@ jobs:
           pnpm --version
 
       - name: Install workspace dependencies
+        working-directory: src
         shell: pwsh
         run: pnpm install
 
-      - name: Prepare packaging environment
+      # 注意：0.1.7 起 apps/desktop/.env.windows.example 里两个 mandatory origin 是空值，
+      # 直接拷贝模板会校验失败（test 部署还要求 allowedAuthOrigins 非空）。
+      # 未签名构建不会访问这些地址，只是打包期校验/嵌入，所以填官方测试域名即可。
+      - name: Write .env.windows
+        working-directory: src
         shell: pwsh
         run: |
-          if (-not (Test-Path apps/desktop/.env.windows)) {
-            Copy-Item apps/desktop/.env.windows.example apps/desktop/.env.windows
-          }
+          $envFile = "apps/desktop/.env.windows"
+          @'
+          DSH_DESKTOP_APP_ID=com.deepseek.harness
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://harness-test.deepseek.com"]}'
+          DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY=4
+          '@ | Set-Content -Path $envFile -Encoding utf8NoBOM
+          Write-Host "--- $envFile ---"
+          Get-Content $envFile
 
       - name: Package win-x64 portable directory (unsigned)
+        working-directory: src
         shell: pwsh
         run: pnpm --filter "@deepseek-ai/dsh-desktop" run package:win:x64:dir --unsigned
 
+      - name: Stamp version file into the app directory
+        working-directory: src
+        shell: pwsh
+        run: |
+          $root = "apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts"
+          $appDir = Join-Path $root "win-unpacked"
+          if (-not (Test-Path (Join-Path $appDir "DeepSeek Harness.exe"))) {
+            $found = Get-ChildItem $root -Directory |
+              Where-Object { Test-Path (Join-Path $_.FullName "DeepSeek Harness.exe") } |
+              Select-Object -First 1
+            if (-not $found) { throw "packaged app directory not found under $root" }
+            $appDir = $found.FullName
+          }
+          $pkg = Get-Content "package.json" -Raw | ConvertFrom-Json
+          @(
+            "version=$($pkg.version)"
+            "tag=${{ steps.ver.outputs.tag }}"
+            "builtAt=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+            "appDir=$(Split-Path -Leaf $appDir)"
+          ) | Set-Content -Path (Join-Path $appDir "DSH-VERSION.txt") -Encoding utf8NoBOM
+          Write-Host "--- app dir ---"
+          Get-ChildItem $appDir | Select-Object Name, Length | Format-Table -AutoSize
+          Get-Content (Join-Path $appDir "DSH-VERSION.txt")
+
       - name: List produced artifacts
         if: always()
+        working-directory: src
         shell: pwsh
         run: |
           $root = "apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts"
           if (Test-Path $root) {
-            Get-ChildItem -Recurse -Depth 1 $root | Select-Object FullName, Length | Format-Table -AutoSize
+            Get-ChildItem -Recurse -Depth 2 $root | Select-Object FullName, Length | Format-Table -AutoSize
           } else {
             Write-Host "No artifacts directory at $root"
           }
@@ -73,7 +136,7 @@ jobs:
       - name: Upload portable app
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-desktop-win-x64-portable
-          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/
+          name: dsh-desktop-win-x64-${{ steps.ver.outputs.version }}
+          path: src/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/
           compression-level: 1
           if-no-files-found: error
