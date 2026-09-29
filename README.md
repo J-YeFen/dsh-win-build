@@ -79,8 +79,15 @@ D:\dsh-desktop\
 * `runs-on: windows-2022`：runner 自带 Visual C++ Build Tools + Windows SDK —— 打包的
   `beforeBuild` 钩子会用 `cl.exe` 编译安装器 UI 组件，**连 `--dir` 也绕不过**。
 * Node 24 + `corepack prepare pnpm@11.7.0`（仓库 `packageManager` 固定版本）。
-* **必须自己写 `.env.windows`**：0.1.7 起 `apps/desktop/.env.windows.example` 里两个
-  mandatory-update origin 是空值，直接拷贝模板会校验失败（`test` 部署还要求
-  `allowedAuthOrigins` 非空）。未签名构建不会访问这些地址，只是打包期校验/嵌入。
+* **必须自己写 `.env.windows`**：0.1.7 起 `apps/desktop/.env.windows.example` 里
+  mandatory-update origin 是空值，直接拷贝模板会校验失败。
+* `.env.windows` 用的是 `AUTO_UPDATE_ENV=production` + 不可达域名
+  `https://dsh-desktop-build.invalid`。原因：强制更新策略会被嵌进应用，运行时客户端
+  会请求 `<origin>/api/v0/check_client_update`；用 `test` 部署 + `harness-test.deepseek.com`
+  时该接口实测返回 `401 UNAUTHENTICATED`（feishu auth required），而
+  `apps/desktop/src/main.ts` 会在 `authentication-required` 且 `app.isPackaged` 时
+  **弹飞书 SSO 登录窗**。`production` 的认证方式固定为 anonymous，域名不可达时策略检查
+  一律 fail-open（既不强制更新也不弹窗）；注意 production 部署不得再配置
+  `allowedAuthOrigins`（配了会直接报错）。
 * 未签名产物没有 `app-update.yml`、没有 blockmap、没有更新源，所以 electron-updater 的
   自动/增量下载**不可用**；更新靠上面的脚本搬运。

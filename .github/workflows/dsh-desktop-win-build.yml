@@ -73,9 +73,19 @@ jobs:
         shell: pwsh
         run: pnpm install
 
-      # 注意：0.1.7 起 apps/desktop/.env.windows.example 里两个 mandatory origin 是空值，
-      # 直接拷贝模板会校验失败（test 部署还要求 allowedAuthOrigins 非空）。
-      # 未签名构建不会访问这些地址，只是打包期校验/嵌入，所以填官方测试域名即可。
+      # 注意：0.1.7 起 apps/desktop/.env.windows.example 里 mandatory origin 是空值，
+      # 直接拷贝模板会校验失败，必须自己写。
+      #
+      # 这里用 production 部署 + 一个不可达域名，原因（已核对 0.1.7-rc.2 源码）：
+      #   * 强制更新策略会嵌进应用，运行时客户端请求
+      #     <origin>/api/v0/check_client_update?scenario=...；
+      #   * 若用 test 部署 + harness-test.deepseek.com，该接口实测返回
+      #     401 {"error":{"code":"UNAUTHENTICATED","message":"feishu auth required"}}，
+      #     而 apps/desktop/src/main.ts 在 error === 'authentication-required' 且
+      #     app.isPackaged 时会弹飞书 SSO 登录窗——自用未签名包不该被打扰；
+      #   * production 的认证方式固定为 anonymous（不会走飞书分支），域名不可达时
+      #     策略检查一律 fail-open（blocking 保持 false），既不强制更新也不弹窗；
+      #   * production 部署下不得配置 allowedAuthOrigins（配置了会直接报错）。
       - name: Write .env.windows
         working-directory: src
         shell: pwsh
@@ -83,10 +93,8 @@ jobs:
           $envFile = "apps/desktop/.env.windows"
           @'
           DSH_DESKTOP_APP_ID=com.deepseek.harness
-          DSH_DESKTOP_AUTO_UPDATE_ENV=test
-          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com
-          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com
-          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://harness-test.deepseek.com"]}'
+          DSH_DESKTOP_AUTO_UPDATE_ENV=production
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://dsh-desktop-build.invalid
           DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY=4
           '@ | Set-Content -Path $envFile -Encoding utf8NoBOM
           Write-Host "--- $envFile ---"
